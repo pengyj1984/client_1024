@@ -1,1 +1,23 @@
 {"Name":"追光骑士团", "Token":""}
+
+backup:
+var save Save
+	file, err := os.Open("./save.txt")
+	defer file.Close()
+	if err != nil {
+		fmt.Println(time.Now(), "找不到save.txt, 新建一个")
+		file, err = os.Create("./save.txt")
+		str := `{"Name":"追光骑士团", "Token":""}`
+		json.Unmarshal([]byte(str), &save)
+		fmt.Println(save)
+		file.Write([]byte(str))
+	} else {
+		bytes := make([]byte, 128)
+		var count int
+		count, err = file.Read(bytes)
+		data := bytes[0:count]
+		json.Unmarshal(data, &save)
+		fmt.Println(save.Name + ", " + save.Token)
+	}
+
+	ws, _, err = websocket.DefaultDialer.Dial(uri, nil)
