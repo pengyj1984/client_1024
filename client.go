@@ -29,6 +29,54 @@ type Save struct{
 	Token string
 }
 
+type LoginMsg struct{
+	msgtype int
+	token string
+}
+
+type GameScore struct {
+	Name string
+	Gold int
+}
+
+/*
+	msgtype 0登陆 -1登陆失败 1请准备 2准备好了 3游戏信息 4玩家行动 5游戏结束
+*/
+type Msg struct {
+	Msgtype int
+	Token   string
+	RoundID int
+	X       int
+	Y       int
+	Sorted  []*GameScore `json:"Results,omitempty"`
+}
+
+type Tile struct {
+	Gold    int
+	P       []*GameScore `json:"Players,omitempty"`
+	players map[string]*PlayerInfo
+}
+
+type Game struct {
+	GameID  uint64
+	Msgtype int
+	status  int //-1无效0准备1开始
+	RoundID int
+	Wid     int
+	Hei     int
+
+	Tilemap [MapHeight][MapWidth]*Tile
+
+	roundRecords []string
+}
+
+type PlayerInfo struct {
+	Key  string
+	X    int
+	Y    int
+	Gold int
+}
+
 func updateFrame(frameData interface{}) {
 	// 捕获处理过程中的异常, 保证不会出现闪退
 	defer func() {
@@ -86,10 +134,23 @@ func main() {
 	ws, _, err = websocket.DefaultDialer.Dial(uri, nil)
 	if err != nil{
 		fmt.Println("websocket连接出错, err = ", err)
-		time.Sleep(time.Second * 10)				// 睡 10 秒再试
+		time.Sleep(time.Second * 2)				// 睡 2 秒再试
 		goto LOGIN
 	}
 	defer ws.Close()
+	loginMsg := LoginMsg{}
+	loginMsg.msgtype = 0
+	loginMsg.token = save.Name
+	sendMessage(loginMsg)
+	
+	for{
+		time.Sleep(time.Millisecond * 10)
+		recv, err = recvMessage()
+		if err == nil{
+			
+		}
+	}
+
 
 	for {
 		time.Sleep(time.Millisecond * 10)				// 睡 10 毫秒
