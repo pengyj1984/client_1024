@@ -22,11 +22,6 @@ type CellInfo struct {
 	risk        int // 风险(到达这个位置后金币数比自己到达这个位置后金币数少的人数)
 }
 
-type Save struct {
-	Name  string
-	Token string
-}
-
 type GameScore struct {
 	Name string
 	Gold int
@@ -47,7 +42,6 @@ type Msg struct {
 type Tile struct {
 	Gold    int
 	P       []*GameScore `json:"Players,omitempty"`
-	players map[string]*PlayerInfo
 }
 
 type Game struct {
@@ -61,16 +55,10 @@ type Game struct {
 	Tilemap [MapHeight][MapWidth]*Tile
 
 	roundRecords []string
+	Sorted  []*GameScore `json:"Results,omitempty"`
 }
 
-type PlayerInfo struct {
-	Key  string
-	X    int
-	Y    int
-	Gold int
-}
-
-func updateFrame(frameData interface{}) {
+func updateFrame(frameData Game) {
 	// 捕获处理过程中的异常, 保证不会出现闪退
 	defer func() {
 		if r := recover(); r != nil {
@@ -78,7 +66,18 @@ func updateFrame(frameData interface{}) {
 		}
 	}()
 
-	fmt.Println(frameData)
+	fmt.Println("RoundId: ", frameData.RoundID)
+	fmt.Println("GameId: ", frameData.GameID)
+	for i := 0; i < len(frameData.Tilemap); i++{
+		for j := 0; j < len(frameData.Tilemap[i]); j++{
+			if len(frameData.Tilemap[i][j].P) > 0{
+				fmt.Println("x, y = ", i, j, "; gold = ", frameData.Tilemap[i][j].Gold)
+				for k := 0; k < len(frameData.Tilemap[i][j].P); k++{
+					fmt.Println("gold = ", frameData.Tilemap[i][j].P[k].Gold, ", name = ", frameData.Tilemap[i][j].P[k].Name)
+				}
+			}			
+		}
+	}
 }
 
 func sendMessage(data interface{}) error {
@@ -125,7 +124,7 @@ func login(uri, token string) error {
 		err = recvMessage(&data)
 		if err == nil {
 			if data.Msgtype == -1 {
-				time.Sleep(time.Second)
+				time.Sleep(time.Second * 2)
 				fmt.Println("服务器拒绝, 登录失败")
 				return errors.New("login failed")
 			}
@@ -138,32 +137,56 @@ func login(uri, token string) error {
 }
 
 var ws *websocket.Conn
+var scores []int
 
 func main() {
 	//online
 	uri := "ws://pgame.51wnl-cq.com:8881/ws"
 	//local debug
 	//uri := "ws://localhost:8881/ws"
-	token := "追光骑士团1"
+	token := "追光骑士团"
 LOGIN:
 	err := login(uri, token)
 	if err != nil {
 		goto LOGIN
 	}
-	defer ws.Close()
+	defer func (){
+		if ws != nil {
+			ws.Close()
+		}
+	}()
 
-	for {
+PREPARE:
+	for{
 		time.Sleep(time.Millisecond * 10) // 睡 10 毫秒
 		data := Msg{}
 		err = recvMessage(&data)
-		if err == nil {
-			if data.Msgtype == 1 {
+		if err == nil{
+			if data.Msgtype == 1{
 				fmt.Println("准备")
 				s := Msg{}
 				s.Msgtype = 2
 				s.Token = token
 				sendMessage(s)
-			} else {
+				goto GAMELOOP
+			}
+		} else{
+			goto LOGIN
+		}
+	}
+GAMELOOP:
+	for {
+		time.Sleep(time.Millisecond * 10) // 睡 10 毫秒
+		data := Game{}
+		err = recvMessage(&data)
+		if err == nil {
+			if data.Msgtype == 5 {
+				fmt.Println("游戏结束")
+				for i := 0; i < len(data.Sorted); i++{
+					fmt.Println("Name = ", data.Sorted[i].Name, ", Gold = ", data.Sorted[i].Gold)
+				}
+				goto PREPARE			
+			} else if data.Msgtype == 3{
 				updateFrame(data)
 			}
 		} else {
