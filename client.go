@@ -27,6 +27,13 @@ type GameScore struct {
 	Gold int
 }
 
+type PlayerInfo struct {
+	Name string
+	X    int
+	Y    int
+	Gold int
+}
+
 /*
 	msgtype 0登陆 -1登陆失败 1请准备 2准备好了 3游戏信息 4玩家行动 5游戏结束
 */
@@ -41,7 +48,7 @@ type Msg struct {
 
 type Tile struct {
 	Gold    int
-	P       []*GameScore `json:"Players,omitempty"`
+	Players []*GameScore `json:"Players,omitempty"`
 }
 
 type Game struct {
@@ -55,7 +62,7 @@ type Game struct {
 	Tilemap [MapHeight][MapWidth]*Tile
 
 	roundRecords []string
-	Sorted  []*GameScore `json:"Results,omitempty"`
+	Sorted       []*GameScore `json:"Results,omitempty"`
 }
 
 func updateFrame(frameData Game) {
@@ -67,17 +74,23 @@ func updateFrame(frameData Game) {
 	}()
 
 	fmt.Println("RoundId: ", frameData.RoundID)
-	fmt.Println("GameId: ", frameData.GameID)
-	for i := 0; i < len(frameData.Tilemap); i++{
-		for j := 0; j < len(frameData.Tilemap[i]); j++{
-			if len(frameData.Tilemap[i][j].P) > 0{
-				fmt.Println("x, y = ", i, j, "; gold = ", frameData.Tilemap[i][j].Gold)
-				for k := 0; k < len(frameData.Tilemap[i][j].P); k++{
-					fmt.Println("gold = ", frameData.Tilemap[i][j].P[k].Gold, ", name = ", frameData.Tilemap[i][j].P[k].Name)
+	// 整理出所有的玩家信息
+	fmt.Println("Sorted: ", len(frameData.Sorted))
+	players := make([]*PlayerInfo, 0, 8)
+	for i := 0; i < len(frameData.Tilemap); i++ {
+		for j := 0; j < len(frameData.Tilemap[i]); j++ {
+			if len(frameData.Tilemap[i][j].Players) > 0 {
+				//fmt.Println("x, y = ", i, j, "; gold = ", frameData.Tilemap[i][j].Gold)
+				for k := 0; k < len(frameData.Tilemap[i][j].Players); k++ {
+					//fmt.Println("gold = ", frameData.Tilemap[i][j].P[k].Gold, ", name = ", frameData.Tilemap[i][j].P[k].Name)
+					p := frameData.Tilemap[i][j].Players[k]
+					players = append(players, &PlayerInfo{Name: p.Name, Gold: p.Gold, X: i, Y: j})
 				}
-			}			
+			}
 		}
 	}
+
+	fmt.Println("players.count = ", len(players))
 }
 
 func sendMessage(data interface{}) error {
@@ -150,19 +163,19 @@ LOGIN:
 	if err != nil {
 		goto LOGIN
 	}
-	defer func (){
+	defer func() {
 		if ws != nil {
 			ws.Close()
 		}
 	}()
 
 PREPARE:
-	for{
+	for {
 		time.Sleep(time.Millisecond * 10) // 睡 10 毫秒
 		data := Msg{}
 		err = recvMessage(&data)
-		if err == nil{
-			if data.Msgtype == 1{
+		if err == nil {
+			if data.Msgtype == 1 {
 				fmt.Println("准备")
 				s := Msg{}
 				s.Msgtype = 2
@@ -170,7 +183,7 @@ PREPARE:
 				sendMessage(s)
 				goto GAMELOOP
 			}
-		} else{
+		} else {
 			goto LOGIN
 		}
 	}
@@ -182,11 +195,11 @@ GAMELOOP:
 		if err == nil {
 			if data.Msgtype == 5 {
 				fmt.Println("游戏结束")
-				for i := 0; i < len(data.Sorted); i++{
+				for i := 0; i < len(data.Sorted); i++ {
 					fmt.Println("Name = ", data.Sorted[i].Name, ", Gold = ", data.Sorted[i].Gold)
 				}
-				goto PREPARE			
-			} else if data.Msgtype == 3{
+				goto PREPARE
+			} else if data.Msgtype == 3 {
 				updateFrame(data)
 			}
 		} else {
