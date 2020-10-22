@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -81,6 +83,31 @@ type Record struct {
 	Expected float64
 	TargetX  int
 	TargetY  int
+	Crowded  int
+}
+
+func saveGame(gameID uint64) error {
+	filename := fmt.Sprintf("./log%d-%d-%d-%d.txt", time.Now().YearDay(), time.Now().Hour(), time.Now().Minute(), time.Now().Second())
+	file, err := os.Create(filename)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	defer file.Close()
+
+	gameStr := fmt.Sprintf("Game: %d\n", gameID)
+	file.Write([]byte(gameStr))
+	for i := 0; i < len(records); i++ {
+		bytes, e := json.Marshal(records[i])
+		if e == nil {
+			file.Write(bytes)
+			file.Write([]byte("\n"))
+		} else {
+			return e
+		}
+	}
+
+	return nil
 }
 
 func sendMessage(data interface{}) error {
@@ -170,13 +197,13 @@ func updateFrame(frameData Game) {
 	}()
 
 	roundId := frameData.RoundID
-	fmt.Println("RoundId: ", roundId)
 	// 整理出所有的玩家信息
 	players := make([]*PlayerInfo, 0, 8)
 	for i := 0; i < len(frameData.Tilemap); i++ {
 		for j := 0; j < len(frameData.Tilemap[i]); j++ {
 			if len(frameData.Tilemap[i][j].Players) > 0 {
-				for k := 0; k < len(frameData.Tilemap[i][j].Players); k++ {
+				playerLen := len(frameData.Tilemap[i][j].Players)
+				for k := 0; k < playerLen; k++ {
 					p := frameData.Tilemap[i][j].Players[k]
 					if p.Name == myName {
 						myX = j
@@ -186,6 +213,7 @@ func updateFrame(frameData Game) {
 						records[roundId].RoundId = roundId
 						records[roundId].X = myX
 						records[roundId].Y = myY
+						records[roundId].Crowded = playerLen
 					} else {
 						players = append(players, &PlayerInfo{Name: p.Name, Gold: p.Gold, X: j, Y: i})
 					}
@@ -193,7 +221,19 @@ func updateFrame(frameData Game) {
 			}
 		}
 	}
-	fmt.Println("X, Y, Gold = ", myX, ", ", myY, ", ", myGold)
+
+	// 给所有玩家拍个序
+	for i := 0; i < len(players); i++ {
+		for j := i + 1; j < len(players); j++ {
+			if players[i].Gold < players[j].Gold {
+				temp := players[i]
+				players[i] = players[j]
+				players[j] = temp
+			}
+		}
+	}
+
+	isfirst := myGold > players[0].Gold
 
 	// 根据棋盘数据生成 cells info
 	cells := make([]*CellInfo, 0, 48)
@@ -235,48 +275,60 @@ func updateFrame(frameData Game) {
 			}
 
 			// 计算预期收益
-			if c.gold == -4 {
-				// a.当金币数量为 -4 时，随机选取该格子中1一个玩家 (马上获得 40% 的利息，利息最高为 10 个金币) 或者 (失去 4个金币) 概率为50%。
-				c.expected = (math.Max(float64(c.left)*0.4, 10)*0.5-2)/float64(c.reachable+1) - float64(c.cost)
-				if c.reachable > 0 {
-					oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
-					riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
-					c.expected += oppoProfit
-					c.expected -= riskProfit
-				}
-			} else if c.gold > 0 && c.gold%5 == 0 {
-				// b.当金币数量大于0且能整除5，该格子中的玩家金币数量全部为 (该格所有玩家金币总数+该金币数量)/玩家数量 并取整。
-				t := float64(c.totalOpportunity)*0.75 + float64(c.totalRisk)*1.25 + float64(c.left)
-				c.expected = t/float64(c.reachable+1) - float64(c.left) - float64(c.cost)
-			} else if c.gold == 7 || c.gold == 11 {
-				// c.当金币数量为 7或者11 时，如果该格子只有1个玩家，该玩家获得对应数量金币，如果该格子有多个玩家，随机选取一个玩家失去对应数量金币。
-				if c.reachable == 0 {
-					c.expected = float64(c.gold)
+			if isfirst || (myGold >= (roundId*11) && roundId >= 50) {
+				// 第一名的时候, 每次都找负分数的地方躲
+				if c.gold == 0 || c.gold == 1 || c.gold == -1 {
+					c.expected = 10
+				} else if c.gold == -4 {
+					c.expected = -10
 				} else {
-					c.expected = float64(-c.gold) / float64(c.reachable+1)
-					oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
-					riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
-					c.expected += oppoProfit
-					c.expected -= riskProfit
-				}
-			} else if c.gold == 8 {
-				// d.当金币数量为 8 时，该格子玩家平分（取整）这8个金币。
-				c.expected = 8/float64(c.reachable+1) - float64(c.cost)
-				if c.reachable > 0 {
-					oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
-					riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
-					c.expected += oppoProfit
-					c.expected -= riskProfit
+					c.expected = float64(-c.gold)
 				}
 			} else {
-				c.expected = float64(c.gold)/(float64(c.opportunity)*0.75+float64(c.risk)*1.25+1) - float64(c.cost)
-				if c.reachable > 0 {
-					oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
-					riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
-					c.expected += oppoProfit
-					c.expected -= riskProfit
+				if c.gold == -4 {
+					// a.当金币数量为 -4 时，随机选取该格子中1一个玩家 (马上获得 40% 的利息，利息最高为 10 个金币) 或者 (失去 4个金币) 概率为50%。
+					c.expected = (math.Max(float64(c.left)*0.4, 10)*0.5-2)/float64(c.reachable+1) - float64(c.cost)
+					if c.reachable > 0 {
+						oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
+						riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
+						c.expected += oppoProfit
+						c.expected -= riskProfit
+					}
+				} else if c.gold > 0 && c.gold%5 == 0 {
+					// b.当金币数量大于0且能整除5，该格子中的玩家金币数量全部为 (该格所有玩家金币总数+该金币数量)/玩家数量 并取整。
+					t := float64(c.totalOpportunity)*oppoWeight + float64(c.totalRisk)*riskWeight + float64(c.left)
+					c.expected = t/float64(c.reachable+1) - float64(c.left) - float64(c.cost)
+				} else if c.gold == 7 || c.gold == 11 {
+					// c.当金币数量为 7或者11 时，如果该格子只有1个玩家，该玩家获得对应数量金币，如果该格子有多个玩家，随机选取一个玩家失去对应数量金币。
+					if c.reachable == 0 {
+						c.expected = float64(c.gold)
+					} else {
+						c.expected = float64(-c.gold) / float64(c.reachable+1)
+						oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
+						riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
+						c.expected += oppoProfit
+						c.expected -= riskProfit
+					}
+				} else if c.gold == 8 {
+					// d.当金币数量为 8 时，该格子玩家平分（取整）这8个金币。
+					c.expected = 8/float64(c.reachable+1) - float64(c.cost)
+					if c.reachable > 0 {
+						oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
+						riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
+						c.expected += oppoProfit
+						c.expected -= riskProfit
+					}
+				} else {
+					c.expected = float64(c.gold)/(float64(c.opportunity)*oppoWeight+float64(c.risk)*riskWeight+1) - float64(c.cost)
+					if c.reachable > 0 {
+						oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
+						riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
+						c.expected += oppoProfit
+						c.expected -= riskProfit
+					}
 				}
 			}
+
 			cells = append(cells, &c)
 		}
 	}
@@ -321,6 +373,9 @@ var myToken string = "追光骑士团"
 var ws *websocket.Conn
 var records [96]Record
 
+var oppoWeight float64 = 1
+var riskWeight float64 = 1
+
 func main() {
 	//online
 	uri := "ws://pgame.51wnl-cq.com:8881/ws"
@@ -363,6 +418,7 @@ GAMELOOP:
 		err = recvMessage(&data)
 		if err == nil {
 			if data.Msgtype == 5 {
+				saveGame(data.GameID)
 				fmt.Println("游戏结束, GameId = ", data.GameID)
 				for i := 0; i < len(data.Sorted); i++ {
 					fmt.Println("Name = ", data.Sorted[i].Name, ", Gold = ", data.Sorted[i].Gold)
