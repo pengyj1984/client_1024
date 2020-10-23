@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	MapWidth  = 8
-	MapHeight = 6
+	MapWidth  = 10
+	MapHeight = 8
 )
 
 type CellInfo struct {
@@ -205,7 +205,7 @@ func updateFrame(frameData Game) {
 				playerLen := len(frameData.Tilemap[i][j].Players)
 				for k := 0; k < playerLen; k++ {
 					p := frameData.Tilemap[i][j].Players[k]
-					if p.Name == myName {
+					if p.Name == myName || p.Name == myToken {
 						myX = j
 						myY = i
 						myGold = p.Gold
