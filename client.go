@@ -368,7 +368,7 @@ func updateFrame(frameData Game) {
 var myX, myY, myGold int
 
 var myName string = "追光骑士团"
-var myToken string = "追光骑士团"
+var myToken string = "DyKiQSgpDhrtMQSsVgvs7NWtS7A79XLI"
 
 var ws *websocket.Conn
 var records [96]Record
