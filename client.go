@@ -275,7 +275,7 @@ func updateFrame(frameData Game) {
 			}
 
 			// 计算预期收益
-			if isfirst || (myGold >= (roundId*11) && roundId >= 50) {
+			if isfirst || (myGold >= (roundId*8) && roundId >= 50) {
 				// 第一名的时候, 每次都找负分数的地方躲
 				if c.gold == 0 || c.gold == 1 || c.gold == -1 {
 					c.expected = 10
