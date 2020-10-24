@@ -17,31 +17,32 @@ const (
 	MapHeight = 8
 )
 
-type CellInfo struct {
-	x                int     // 0 ~ MapWidth - 1
-	y                int     // 0 ~ MapHeight - 1
-	gold             int     // 这个格子的分数
-	cost             int     // 我移动过来的消耗
-	left             int     // 我移动过来的剩余
-	reachable        int     // 这个格子上可能的人数(除了我自己)
-	opportunity      int     // 机遇(到达这个位置后金币数比自己到达这个位置后金币数多的人数)
-	risk             int     // 风险(到达这个位置后金币数比自己到达这个位置后金币数少的人数)
-	totalLeft        int     // 能到达这个位置的所有玩家剩余金币总和(用来算平均分)
-	totalOpportunity int     // 所有到达这个位置后金币比我多的人的金币总和
-	totalRisk        int     // 所有到达这个位置后金币比我少的人的金币综合
-	expected         float64 // 预期收益
-}
-
 type GameScore struct {
 	Name string
 	Gold int
 }
 
+type Cell struct {
+	X int
+	Y int
+}
+
 type PlayerInfo struct {
-	Name string
-	X    int
-	Y    int
-	Gold int
+	Name             string
+	X                int
+	Y                int
+	Gold             int
+	Rank             float32 // 排名比例(当前排名/总人数), 越低越好
+	Joined           bool    // 是否参加了本局比赛
+	EstimateLeft     int     // 预测的下一步到达后剩余
+	Bingo            int     // 预测准确的回合数
+	Precision        float32 // 预测准确率
+	HighestPrecision float32 // 历史最高准确率
+	LowestPrecision  float32 // 历史最低准确率
+	TotalPrecision   float32 // 总预测准确率
+	TotalGame        int     // 总参与局数
+	AverPrecision    float32 // 平均准确率
+	Cells            []*Cell
 }
 
 /*
@@ -57,8 +58,20 @@ type Msg struct {
 }
 
 type Tile struct {
-	Gold    int
-	Players []*GameScore `json:"Players,omitempty"`
+	Gold             int
+	Players          []*GameScore `json:"Players,omitempty"`
+	x                int          // 0 ~ MapWidth - 1
+	y                int          // 0 ~ MapHeight - 1
+	cost             int          // 我移动过来的消耗
+	left             int          // 我移动过来的剩余
+	leftFlag         int          // left是否计算过了
+	reachable        int          // 这个格子上可能的人数(除了我自己)
+	opportunity      float32      // 机遇(到达这个位置后金币数比自己到达这个位置后金币数多的人数)
+	risk             float32      // 风险(到达这个位置后金币数比自己到达这个位置后金币数少的人数)
+	totalLeft        int          // 能到达这个位置的所有玩家剩余金币总和(用来算平均分)
+	totalOpportunity int          // 所有到达这个位置后金币比我多的人的金币总和
+	totalRisk        int          // 所有到达这个位置后金币比我少的人的金币综合
+	expected         float32      // 预期收益
 }
 
 type Game struct {
@@ -80,7 +93,7 @@ type Record struct {
 	X        int
 	Y        int
 	Gold     int
-	Expected float64
+	Expected float32
 	TargetX  int
 	TargetY  int
 	Crowded  int
@@ -105,6 +118,30 @@ func saveGame(gameID uint64) error {
 		} else {
 			return e
 		}
+	}
+
+	for p := range allPlayers {
+		player, _ := allPlayers[p]
+		if player.Joined {
+			player.TotalGame++
+			player.TotalPrecision += player.Precision
+			player.AverPrecision = player.TotalPrecision / float32(player.TotalGame)
+			if player.Precision > player.HighestPrecision {
+				player.HighestPrecision = player.Precision
+			}
+			if player.LowestPrecision > player.Precision {
+				player.LowestPrecision = player.Precision
+			}
+			bytes, e := json.Marshal(player)
+			if e == nil {
+				file.Write(bytes)
+				file.Write([]byte("\n"))
+			} else {
+				return e
+			}
+		}
+
+		player.Joined = false
 	}
 
 	return nil
@@ -197,34 +234,130 @@ func updateFrame(frameData Game) {
 	}()
 
 	roundId := frameData.RoundID
+	tileMap := frameData.Tilemap
 	// 整理出所有的玩家信息
 	players := make([]*PlayerInfo, 0, 8)
-	for i := 0; i < len(frameData.Tilemap); i++ {
-		for j := 0; j < len(frameData.Tilemap[i]); j++ {
-			if len(frameData.Tilemap[i][j].Players) > 0 {
-				playerLen := len(frameData.Tilemap[i][j].Players)
-				for k := 0; k < playerLen; k++ {
-					p := frameData.Tilemap[i][j].Players[k]
-					if p.Name == myName || p.Name == myToken {
-						myX = j
-						myY = i
-						myGold = p.Gold
-						records[roundId].Gold = p.Gold
-						records[roundId].RoundId = roundId
-						records[roundId].X = myX
-						records[roundId].Y = myY
-						records[roundId].Crowded = playerLen
-					} else {
-						players = append(players, &PlayerInfo{Name: p.Name, Gold: p.Gold, X: j, Y: i})
+	if frameData.RoundID == 0 {
+		// 第一局, 需要处理新玩家加入, 还有标记哪些玩家进入了游戏
+		for i := 0; i < len(tileMap); i++ {
+			for j := 0; j < len(tileMap[i]); j++ {
+				tileMap[i][j].x = j
+				tileMap[i][j].y = i
+				if len(tileMap[i][j].Players) > 0 {
+					playerLen := len(tileMap[i][j].Players)
+					for k := 0; k < playerLen; k++ {
+						p := tileMap[i][j].Players[k]
+						player, ok := allPlayers[p.Name]
+						if ok {
+							player.Gold = p.Gold
+							player.X = myX
+							player.Y = myY
+							player.Joined = true
+							player.Bingo = 1
+							if p.Name == myName || p.Name == myToken {
+								myX = j
+								myY = i
+								myGold = p.Gold
+								records[roundId].Gold = p.Gold
+								records[roundId].RoundId = roundId
+								records[roundId].X = myX
+								records[roundId].Y = myY
+								records[roundId].Crowded = playerLen
+							} else if p.Name == "FixedRobot" {
+								fixedX = j
+								fixedY = i
+								fixedGold = p.Gold
+								player.Precision = 1 // 固定机器人一定是准的...
+							} else if p.Name == "RandRobot" {
+								player.Precision = 0 // 随机机器人一定不准
+							} else {
+								player.Precision = 1
+							}
+							players = append(players, player)
+						} else {
+							player = &PlayerInfo{}
+							player.X = j
+							player.Y = i
+							player.Name = p.Name
+							player.Gold = p.Gold
+							player.Joined = true
+							if p.Name == myName || p.Name == myToken {
+								myX = j
+								myY = i
+								myGold = p.Gold
+								records[roundId].Gold = p.Gold
+								records[roundId].RoundId = roundId
+								records[roundId].X = myX
+								records[roundId].Y = myY
+								records[roundId].Crowded = playerLen
+							} else if p.Name == "FixedRobot" {
+								fixedX = j
+								fixedY = i
+								fixedGold = p.Gold
+								player.Precision = 1 // 固定机器人一定是准的...
+							} else if p.Name == "RandRobot" {
+								player.Precision = 0 // 随机机器人一定不准
+							} else {
+								player.HighestPrecision = 0
+								player.LowestPrecision = 1
+								player.Precision = 1
+							}
+							allPlayers[p.Name] = player
+							players = append(players, player)
+						}
+					}
+				}
+			}
+		}
+	} else {
+		// 非第一局, 理论上不用再处理新玩家了, 如果在map中找不到, 就不管了
+		for i := 0; i < len(tileMap); i++ {
+			for j := 0; j < len(tileMap[i]); j++ {
+				tileMap[i][j].x = j
+				tileMap[i][j].y = i
+				if len(tileMap[i][j].Players) > 0 {
+					playerLen := len(tileMap[i][j].Players)
+					for k := 0; k < playerLen; k++ {
+						p := tileMap[i][j].Players[k]
+						player, ok := allPlayers[p.Name]
+						if ok {
+							player.X = j
+							player.Y = i
+							player.Gold = p.Gold
+							if p.Name == myName || p.Name == myToken {
+								myX = j
+								myY = i
+								myGold = p.Gold
+								records[roundId].Gold = p.Gold
+								records[roundId].RoundId = roundId
+								records[roundId].X = myX
+								records[roundId].Y = myY
+								records[roundId].Crowded = playerLen
+							} else if p.Name == "FixedRobot" {
+								fixedX = j
+								fixedY = i
+								fixedGold = p.Gold
+							} else if p.Name != "RandRobot" {
+								for l := 0; l < len(player.Cells); l++ {
+									if player.X == player.Cells[l].X && player.Y == player.Cells[l].Y {
+										player.Bingo++
+										break
+									}
+								}
+								player.Precision = float32(player.Bingo) / float32(roundId)
+							}
+							players = append(players, player)
+						}
 					}
 				}
 			}
 		}
 	}
 
-	// 给所有玩家拍个序
-	for i := 0; i < len(players); i++ {
-		for j := i + 1; j < len(players); j++ {
+	playersLen := len(players)
+	// 给所有玩家排个序
+	for i := 0; i < playersLen; i++ {
+		for j := i + 1; j < playersLen; j++ {
 			if players[i].Gold < players[j].Gold {
 				temp := players[i]
 				players[i] = players[j]
@@ -233,103 +366,121 @@ func updateFrame(frameData Game) {
 		}
 	}
 
-	isfirst := myGold > players[0].Gold
+	var myRank float32 = 1
+	for i := 0; i < playersLen; i++ {
+		if players[i].Name == myName || players[i].Name == myToken {
+			myRank = float32(i+1) / float32(playersLen)
+			break
+		}
+	}
+
+	// 先判断固定机器人是否金币比我多
+	if fixedGold > myGold && (fixedGold <= 0 || fixedGold%5 != 0 || myRank >= 0.3) {
+		fixedCost := int(math.Floor((math.Abs(float64(fixedX-myX)) + math.Abs(float64(fixedY-myY))) * 1.5))
+		if fixedCost <= myGold {
+			records[roundId].TargetX = fixedX
+			records[roundId].TargetY = fixedY
+			records[roundId].Expected = 1024 // 特别标记
+			fmt.Println(records[roundId])
+			sendMove(fixedX, fixedY, roundId)
+			return
+		}
+	}
+
+	// 预测所有玩家行为
+	for i := 0; i < playersLen; i++ {
+		player := players[i]
+		player.Rank = float32(i+1) / float32(playersLen)
+		if player.Name == myName || player.Name == myToken || player.Name == "FixedRobot" || player.Name == "RandRobot" {
+			continue
+		}
+		player.Cells = make([]*Cell, 0, 4)
+		var highestExp int = -99
+		var left int = 0
+		for j := 0; j < len(tileMap); j++ {
+			for k := 0; k < len(tileMap[j]); k++ {
+				var cost int
+				if k == player.X && j == player.Y {
+					cost = 1
+				} else {
+					cost = int(math.Floor((math.Abs(float64(k-player.X)) + math.Abs(float64(j-player.Y))) * 1.5))
+				}
+				expected := tileMap[j][k].Gold - cost
+				if expected == highestExp {
+					player.Cells = append(player.Cells, &Cell{X: k, Y: j})
+				}
+				if expected > highestExp {
+					player.Cells = player.Cells[0:0] // 清空切片
+					player.Cells = append(player.Cells, &Cell{X: k, Y: j})
+					highestExp = expected
+					left = player.Gold - cost
+				}
+			}
+		}
+		player.EstimateLeft = left
+		precision := (player.Precision + player.AverPrecision) / 2
+		for j := 0; j < len(player.Cells); j++ {
+			cell := player.Cells[j]
+			tileMap[cell.Y][cell.X].reachable += 1
+			var myLeft int = tileMap[cell.Y][cell.X].left
+			if tileMap[cell.Y][cell.X].leftFlag == 0 {
+				var cost int
+				if cell.X == myX && cell.Y == myY {
+					cost = 1
+				} else {
+					cost = int(math.Floor((math.Abs(float64(cell.X-myX)) + math.Abs(float64(cell.Y-myY))) * 1.5))
+				}
+				myLeft = myGold - cost
+				tileMap[cell.Y][cell.X].left = myLeft
+				tileMap[cell.Y][cell.X].cost = cost
+				tileMap[cell.Y][cell.X].leftFlag = 1
+			}
+
+			if left > myLeft {
+				tileMap[cell.Y][cell.X].opportunity += precision
+			} else {
+				tileMap[cell.Y][cell.X].risk += precision
+			}
+		}
+	}
 
 	// 根据棋盘数据生成 cells info
-	cells := make([]*CellInfo, 0, 48)
-	for i := 0; i < len(frameData.Tilemap); i++ {
-		for j := 0; j < len(frameData.Tilemap[i]); j++ {
-			c := CellInfo{x: j, y: i, gold: frameData.Tilemap[i][j].Gold, reachable: 0, opportunity: 0, risk: 0}
-			if i == myY && j == myX {
-				c.cost = 1
-				c.left = myGold - 1
-				c.totalLeft += c.left
-			} else {
-				cost := int(math.Floor((math.Abs(float64(i-myY)) + math.Abs(float64(j-myX))) * 1.5))
-				if cost > myGold {
-					// 不可到达
-					continue
+	cells := make([]*Tile, 0, 48)
+	for i := 0; i < len(tileMap); i++ {
+		for j := 0; j < len(tileMap[i]); j++ {
+			tile := tileMap[i][j]
+			if tile.left == 0 {
+				var cost int
+				if j == myX && i == myY {
+					cost = 1
 				} else {
-					c.cost = cost
-					c.left = myGold - cost
-					c.totalLeft += c.left
+					cost = int(math.Floor((math.Abs(float64(tile.x-myX)) + math.Abs(float64(tile.y-myY))) * 1.5))
+				}
+				left := myGold - cost
+				if left < 0 {
+					continue
 				}
 			}
-
-			// 计算其他玩家到这里的消耗
-			for k := 0; k < len(players); k++ {
-				player := players[k]
-				cost := int(math.Floor((math.Abs(float64(i-player.Y)) + math.Abs(float64(j-player.X))) * 1.5))
-				if cost >= player.Gold {
-					c.reachable++
-					left := player.Gold - cost
-					if left > c.left {
-						c.opportunity++
-						c.totalOpportunity += left
-					} else {
-						c.risk++
-						c.totalRisk += left
-					}
-					c.totalLeft += left
-				}
-			}
+			cells = append(cells, tileMap[i][j])
 
 			// 计算预期收益
-			if isfirst || (myGold >= (roundId*8) && roundId >= 50) {
+			if myRank < 0.2 || myGold >= lastGold {
 				// 第一名的时候, 每次都找负分数的地方躲
-				if c.gold == 0 || c.gold == 1 || c.gold == -1 {
-					c.expected = 10
-				} else if c.gold == -4 {
-					c.expected = -10
+				if tile.Gold == 0 || tile.Gold == 1 || tile.Gold == -1 {
+					tile.expected = 15 - tile.risk - float32(tile.cost)
 				} else {
-					c.expected = float64(-c.gold)
+					tile.expected = float32(tile.Gold) - tile.risk*2 - float32(tile.cost)
+				}
+			} else if myRank > 0.8 {
+				// 倒数, 考虑一个激进的策略
+				if tile.Gold > 0 && tile.Gold%5 == 0 {
+					tile.expected = float32(tile.Gold) + tile.opportunity*2 - float32(tile.cost)
+				} else {
+					tile.expected = float32(tile.Gold) + tile.opportunity - tile.risk - float32(tile.cost)
 				}
 			} else {
-				if c.gold == -4 {
-					// a.当金币数量为 -4 时，随机选取该格子中1一个玩家 (马上获得 40% 的利息，利息最高为 10 个金币) 或者 (失去 4个金币) 概率为50%。
-					c.expected = (math.Max(float64(c.left)*0.4, 10)*0.5-2)/float64(c.reachable+1) - float64(c.cost)
-					if c.reachable > 0 {
-						oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
-						riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
-						c.expected += oppoProfit
-						c.expected -= riskProfit
-					}
-				} else if c.gold > 0 && c.gold%5 == 0 {
-					// b.当金币数量大于0且能整除5，该格子中的玩家金币数量全部为 (该格所有玩家金币总数+该金币数量)/玩家数量 并取整。
-					t := float64(c.totalOpportunity)*oppoWeight + float64(c.totalRisk)*riskWeight + float64(c.left)
-					c.expected = t/float64(c.reachable+1) - float64(c.left) - float64(c.cost)
-				} else if c.gold == 7 || c.gold == 11 {
-					// c.当金币数量为 7或者11 时，如果该格子只有1个玩家，该玩家获得对应数量金币，如果该格子有多个玩家，随机选取一个玩家失去对应数量金币。
-					if c.reachable == 0 {
-						c.expected = float64(c.gold)
-					} else {
-						c.expected = float64(-c.gold) / float64(c.reachable+1)
-						oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
-						riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
-						c.expected += oppoProfit
-						c.expected -= riskProfit
-					}
-				} else if c.gold == 8 {
-					// d.当金币数量为 8 时，该格子玩家平分（取整）这8个金币。
-					c.expected = 8/float64(c.reachable+1) - float64(c.cost)
-					if c.reachable > 0 {
-						oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
-						riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
-						c.expected += oppoProfit
-						c.expected -= riskProfit
-					}
-				} else {
-					c.expected = float64(c.gold)/(float64(c.opportunity)*oppoWeight+float64(c.risk)*riskWeight+1) - float64(c.cost)
-					if c.reachable > 0 {
-						oppoProfit := (float64(c.totalOpportunity) * 0.25) / (float64(c.reachable) * float64(1+c.risk))
-						riskProfit := (float64(c.left) * 0.25 * float64(c.risk)) / float64(c.reachable)
-						c.expected += oppoProfit
-						c.expected -= riskProfit
-					}
-				}
+				tile.expected = float32(tile.Gold) + tile.opportunity - tile.risk - float32(tile.cost)
 			}
-
-			cells = append(cells, &c)
 		}
 	}
 
@@ -345,7 +496,7 @@ func updateFrame(frameData Game) {
 	}
 
 	// 找出预期值最高的n个, 再随机选一个
-	highest := make([]*CellInfo, 0, 8)
+	highest := make([]*Tile, 0, 8)
 	bestEx := cells[0].expected
 	highest = append(highest, cells[0])
 	for i := 0; i < len(cells); i++ {
@@ -356,7 +507,12 @@ func updateFrame(frameData Game) {
 		}
 	}
 
-	rnd := rand.Int31n(int32(len(highest)))
+	// 做个随机, 让自己的行为难以预测
+	lenOfHighest := int32(len(highest))
+	rnd := rand.Int31n(lenOfHighest)
+	if rnd >= lenOfHighest {
+		rnd = lenOfHighest - 1
+	}
 
 	records[roundId].TargetX = cells[rnd].x
 	records[roundId].TargetY = cells[rnd].y
@@ -366,12 +522,16 @@ func updateFrame(frameData Game) {
 }
 
 var myX, myY, myGold int
+var fixedX, fixedY, fixedGold int
+var lastGold int = 100
 
 var myName string = "追光骑士团"
 var myToken string = "DyKiQSgpDhrtMQSsVgvs7NWtS7A79XLI"
 
 var ws *websocket.Conn
 var records [96]Record
+
+var allPlayers map[string]*PlayerInfo = make(map[string]*PlayerInfo)
 
 var oppoWeight float64 = 1
 var riskWeight float64 = 1
@@ -419,6 +579,7 @@ GAMELOOP:
 		if err == nil {
 			if data.Msgtype == 5 {
 				saveGame(data.GameID)
+				lastGold = myGold
 				fmt.Println("游戏结束, GameId = ", data.GameID)
 				for i := 0; i < len(data.Sorted); i++ {
 					fmt.Println("Name = ", data.Sorted[i].Name, ", Gold = ", data.Sorted[i].Gold)
