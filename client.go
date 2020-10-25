@@ -89,14 +89,17 @@ type Game struct {
 }
 
 type Record struct {
-	RoundId  int
-	X        int
-	Y        int
-	Gold     int
-	Expected float32
-	TargetX  int
-	TargetY  int
-	Crowded  int
+	RoundId   int
+	X         int
+	Y         int
+	Gold      int
+	Expected  float32
+	TargetX   int
+	TargetY   int
+	Crowded   int
+	Rank      float32
+	FirstGold int
+	FirstName string
 }
 
 func saveGame(gameID uint64) error {
@@ -191,7 +194,7 @@ func login(uri, token string) error {
 		err = recvMessage(&data)
 		if err == nil {
 			if data.Msgtype == -1 {
-				time.Sleep(time.Second * 2)
+				time.Sleep(time.Second * 5)
 				fmt.Println("服务器拒绝, 登录失败")
 				return errors.New("login failed")
 			}
@@ -366,25 +369,34 @@ func updateFrame(frameData Game) {
 		}
 	}
 
+	records[roundId].FirstGold = players[0].Gold
+	records[roundId].FirstName = players[0].Name
+
 	var myRank float32 = 1
 	for i := 0; i < playersLen; i++ {
 		if players[i].Name == myName || players[i].Name == myToken {
 			myRank = float32(i+1) / float32(playersLen)
+			records[roundId].Rank = myRank
 			break
 		}
 	}
 
 	// 先判断固定机器人是否金币比我多
-	if fixedGold > myGold && (fixedGold <= 0 || fixedGold%5 != 0 || myRank >= 0.3) {
+	if fixedGold > myGold && (fixedGold <= 0 || fixedGold%5 != 0 || myRank >= 0.2) {
 		fixedCost := int(math.Floor((math.Abs(float64(fixedX-myX)) + math.Abs(float64(fixedY-myY))) * 1.5))
 		if fixedCost <= myGold {
 			records[roundId].TargetX = fixedX
 			records[roundId].TargetY = fixedY
-			records[roundId].Expected = 1024 // 特别标记
-			fmt.Println(records[roundId])
+			records[roundId].Expected = 1000 + float32(fixedGold)*0.25 // 特别标记
 			sendMove(fixedX, fixedY, roundId)
+			fmt.Println(records[roundId])
 			return
 		}
+
+		tileMap[fixedY][fixedX].cost = fixedCost
+		tileMap[fixedY][fixedX].left = myGold - fixedCost
+		tileMap[fixedY][fixedX].leftFlag = 1
+		tileMap[fixedY][fixedX].risk = 10
 	}
 
 	// 预测所有玩家行为
@@ -449,7 +461,9 @@ func updateFrame(frameData Game) {
 	for i := 0; i < len(tileMap); i++ {
 		for j := 0; j < len(tileMap[i]); j++ {
 			tile := tileMap[i][j]
-			if tile.left == 0 {
+			if tile.leftFlag == 1 && tile.left < 0 {
+				continue
+			} else if tile.leftFlag == 0 {
 				var cost int
 				if j == myX && i == myY {
 					cost = 1
@@ -460,18 +474,21 @@ func updateFrame(frameData Game) {
 				if left < 0 {
 					continue
 				}
+				tile.leftFlag = 1
+				tile.left = left
+				tile.cost = cost
 			}
 			cells = append(cells, tileMap[i][j])
 
 			// 计算预期收益
-			if myRank < 0.2 || myGold >= lastGold {
+			if myRank < 0.1 || myGold >= lastGold {
 				// 第一名的时候, 每次都找负分数的地方躲
 				if tile.Gold == 0 || tile.Gold == 1 || tile.Gold == -1 {
 					tile.expected = 15 - tile.risk - float32(tile.cost)
 				} else {
 					tile.expected = float32(tile.Gold) - tile.risk*2 - float32(tile.cost)
 				}
-			} else if myRank > 0.8 {
+			} else if myRank > 0.5 {
 				// 倒数, 考虑一个激进的策略
 				if tile.Gold > 0 && tile.Gold%5 == 0 {
 					tile.expected = float32(tile.Gold) + tile.opportunity*2 - float32(tile.cost)
@@ -496,6 +513,15 @@ func updateFrame(frameData Game) {
 	}
 
 	// 找出预期值最高的n个, 再随机选一个
+	if len(cells) == 0 {
+		records[roundId].TargetX = myX
+		records[roundId].TargetY = myY
+		records[roundId].Expected = 2000 + float32(tileMap[myY][myX].Gold)
+		sendMove(myX, myY, frameData.RoundID)
+		fmt.Println(records[roundId])
+		return
+	}
+
 	highest := make([]*Tile, 0, 8)
 	bestEx := cells[0].expected
 	highest = append(highest, cells[0])
@@ -517,8 +543,8 @@ func updateFrame(frameData Game) {
 	records[roundId].TargetX = cells[rnd].x
 	records[roundId].TargetY = cells[rnd].y
 	records[roundId].Expected = cells[rnd].expected
-	fmt.Println(records[roundId])
 	sendMove(cells[rnd].x, cells[rnd].y, frameData.RoundID)
+	fmt.Println(records[roundId])
 }
 
 var myX, myY, myGold int
@@ -532,9 +558,6 @@ var ws *websocket.Conn
 var records [96]Record
 
 var allPlayers map[string]*PlayerInfo = make(map[string]*PlayerInfo)
-
-var oppoWeight float64 = 1
-var riskWeight float64 = 1
 
 func main() {
 	//online
@@ -584,7 +607,7 @@ GAMELOOP:
 				for i := 0; i < len(data.Sorted); i++ {
 					fmt.Println("Name = ", data.Sorted[i].Name, ", Gold = ", data.Sorted[i].Gold)
 				}
-				fmt.Println(records)
+				//fmt.Println(records)
 				goto PREPARE
 			} else if data.Msgtype == 3 {
 				updateFrame(data)
